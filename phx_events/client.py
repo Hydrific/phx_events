@@ -3,7 +3,8 @@ from asyncio import AbstractEventLoop, Event, Queue, Task
 from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import partial
 import inspect
-from logging import Logger
+from logging import DEBUG, Logger
+from os import environ
 import signal
 from types import TracebackType
 from typing import Awaitable, cast, Optional, Type, Union
@@ -13,6 +14,8 @@ from websockets import client
 
 from phx_events import json_handler
 from phx_events.async_logger import async_logger
+async_logger.setLevel(DEBUG)
+
 from phx_events.exceptions import PHXTopicTooManyRegistrationsError, TopicClosedError
 from phx_events.phx_messages import (
     ChannelEvent,
@@ -218,6 +221,7 @@ class PHXChannelsClient:
             self._registration_queue.task_done()
 
     def register_topic_subscription(self, topic: Topic) -> Event:
+        self.logger.debug(f"Topic: {topic}")
         if topic_status := self._topic_registration_status.get(topic):
             topic_ref = topic_status.connection_ref
             raise PHXTopicTooManyRegistrationsError(f'Topic {topic} already registered with {topic_ref=}')
@@ -253,6 +257,7 @@ class PHXChannelsClient:
                     await self._registration_queue.put(phx_message)
 
             event_handler_config = self._event_handler_config.get(event)
+            self.logger.debug(f'Config: {event_handler_config}')
             if event_handler_config is None:
                 self.logger.debug(f'Ignoring {phx_message=} - no event handlers registered')
                 continue
@@ -266,7 +271,43 @@ class PHXChannelsClient:
         registration_messages = []
         for topic, topic_registration_config in self._topic_registration_status.items():
             self.logger.info(f'Creating subscribe message for {topic=}')
-            topic_join_message = make_message(event=PHXEvent.join, topic=topic)
+            _ = {
+                #"uuid": "0c65295c-1c08-457f-9e52-Bde4b1670185",  # WalterP, Batch3-11
+                #"uuid": "dfe35755-96f1-40b6-bb9a-65c5443ae74e", # jcb01
+                #"uuid": "93012345-6789-abcd-ef01-23456789abcd",  # jcb02
+#                "uuid": "b4a67218-437a-5316-2167-5a52051e3a39",
+#                "nerves_fw_uuid": "fe8b3550-aeb1-5e56-ac40-0688a15564e4",
+#                "uuid": "3f1e7191-b325-5b73-2b8b-e06eac197219",
+#                 "architecture": "fake",
+#                 "platform": "dummy",
+#                 "product": "sensor_hub",
+#                 "version": "0.11.0",
+#                 "author": "The Nerves Team",
+#                 "description": "This is a description",
+#                 "fwup_version": "1.10.1",
+#                 "vcs_identifier": "",
+#                 "misc": ""
+
+                "console_version":  "1.0.0",
+                "currently_downloading_uuid": None,
+                "device_api_version": "1.0.0",
+#                "fwup_version": "1.10.1",
+                "fwup_version": "",
+                "nerves_fw_application_part0_devpath": "/dev/mmcblk0p3",
+                "nerves_fw_application_part0_fstype": "ext4",
+                "nerves_fw_application_part0_target": "/root",
+                "nerves_fw_architecture": "arm", "nerves_fw_author": "The Nerves Team",
+                "nerves_fw_description": "",
+                "nerves_fw_misc": "",
+                "nerves_fw_platform": "rpi3a",
+                "nerves_fw_product": "sensor_hub",
+                "nerves_fw_uuid": "fe8b3550-aeb1-5e56-ac40-0688a15564e4",
+                "nerves_fw_vcs_identifier": "",
+#                "nerves_fw_version": "0.13.4"
+                "nerves_fw_version": "0.11.0"
+            }
+            topic_join_message =  make_message(event=PHXEvent.join, topic=topic, payload=_)
+            self.logger.info(f'topic_join_message: {topic_join_message}')
 
             topic_registration_config.connection_ref = topic_join_message.ref
             registration_messages.append(topic_join_message)
@@ -287,7 +328,17 @@ class PHXChannelsClient:
         with self._executor_pool as pool:
             self.logger.debug('Connecting to websocket')
 
-            async with client.connect(self.channel_socket_url) as websocket:
+            from ssl import SSLContext, PROTOCOL_TLS_CLIENT
+            from os import environ
+            ssl_context = SSLContext(PROTOCOL_TLS_CLIENT)
+            ep = "wss://device.hydrific.me/socket/websocket"
+            ssl_context.load_verify_locations(cafile=environ['NERVES_CA_CERT'])
+            certfile, keyfile = environ['NERVES_HUB_CERT'], environ['NERVES_HUB_KEY']
+            self.logger.info(f"certfile: {certfile}")
+            self.logger.info(f"keyfile: {keyfile}")
+            ssl_context.load_cert_chain(certfile=certfile, keyfile=keyfile)
+
+            async with client.connect(self.channel_socket_url, ssl=ssl_context) as websocket:
                 # Close the connection when receiving SIGTERM
                 shutdown_handler = partial(
                     self.shutdown,
